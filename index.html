@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced 3D FPS Endless Runner</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            cursor: none;
+        }
+        #gameCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            border: 2px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+        }
+        #ammo {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 24px;
+        }
+        #healthBar {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 200px;
+            height: 20px;
+            background-color: #333;
+        }
+        #healthBarFill {
+            width: 100%;
+            height: 100%;
+            background-color: #00ff00;
+            transition: width 0.3s ease-in-out;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="crosshair"></div>
+    <div id="hud">
+        <div id="fps">FPS: 0</div>
+        <div id="score">Score: 0</div>
+    </div>
+    <div id="ammo">Ammo: 30 / 30</div>
+    <div id="healthBar"><div id="healthBarFill"></div></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+    // Game variables
+    let scene, camera, renderer, player, pillars = [], obstacles = [];
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+    let raycaster, mouse = new THREE.Vector2();
+    let clock = new THREE.Clock();
+    let deltaTime = 0;
+    let score = 0;
+    let frameCount = 0;
+    let fpsInterval = 0;
+    let startTime, now, then, elapsed;
+
+    // Player stats
+    let health = 100;
+    let ammo = 30;
+    let maxAmmo = 30;
+
+    // Player movement
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+    let moveSpeed = 200.0;
+
+    // Weapon
+    let weapon, muzzleFlash;
+    let canShoot = true;
+    let shootCooldown = 0.1; // seconds
+    let shootTimer = 0;
+
+    // Particle systems
+    let particleSystems = [];
+
+    // Initialize the game
+    function init() {
+        // Create scene
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);  // Sky blue background
+        scene.fog = new THREE.Fog(0x87CEEB, 0, 750);  // Add fog for depth
+
+        // Create camera
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 1.6, 0);  // Position camera at average human height
+
+        // Create renderer
+        renderer = new THREE.WebGLRenderer({canvas: document.getElementById('gameCanvas'), antialias: true});
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        // Create player
+        player = new THREE.Object3D();
+        player.add(camera);
+        scene.add(player);
+
+        // Create weapon
+        createWeapon();
+
+        // Create floor
+        const floorGeometry = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+        floorGeometry.rotateX(-Math.PI / 2);
+        const floorMaterial = new THREE.MeshLambertMaterial({color: 0x999999});
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // Create pillars
+        createPillars();
+
+        // Create obstacles
+        createObstacles();
+
+        // Add lighting
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+        directionalLight.position.set(1, 1, 1).normalize();
+        directionalLight.castShadow = true;
+        scene.add(directionalLight);
+
+        // Set up raycaster for collision detection
+        raycaster = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0), 0, 10);
+
+        // Event listeners
+        window.addEventListener('resize', onWindowResize, false);
+        document.addEventListener('keydown', onKeyDown, false);
+        document.addEventListener('keyup', onKeyUp, false);
+        document.addEventListener('mousemove', onMouseMove, false);
+        document.addEventListener('mousedown', onMouseDown, false);
+        document.addEventListener('mouseup', onMouseUp, false);
+
+        // Lock pointer
+        document.body.requestPointerLock = document.body.requestPointerLock || document.body.mozRequestPointerLock;
+        document.getElementById('gameCanvas').addEventListener('click', function() {
+            document.body.requestPointerLock();
+        }, false);
+
+        // Start FPS counter
+        startTime = Date.now();
+        then = startTime;
+        startAnimating(60);  // Target 60 FPS
+    }
+
+    // Create weapon
+    function createWeapon() {
+        const weaponGeometry = new THREE.BoxGeometry(0.1, 0.1, 0.5);
+        const weaponMaterial = new THREE.MeshPhongMaterial({color: 0x333333});
+        weapon = new THREE.Mesh(weaponGeometry, weaponMaterial);
+        weapon.position.set(0.3, -0.3, -0.5);
+        camera.add(weapon);
+
+        // Create muzzle flash
+        const muzzleFlashGeometry = new THREE.PlaneGeometry(0.1, 0.1);
+        const muzzleFlashMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffff00,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        muzzleFlash = new THREE.Mesh(muzzleFlashGeometry, muzzleFlashMaterial);
+        muzzleFlash.position.set(0, 0, -0.3);
+        weapon.add(muzzleFlash);
+    }
+
+    // Create pillars
+    function createPillars() {
+        const pillarGeometry = new THREE.BoxGeometry(2, 10, 2);
+        const pillarMaterial = new THREE.MeshPhongMaterial({color: 0x8B4513});  // Brown color
+
+        for (let i = 0; i < 40; i++) {
+            const pillarLeft = new THREE.Mesh(pillarGeometry, pillarMaterial);
+            const pillarRight = new THREE.Mesh(pillarGeometry, pillarMaterial);
+
+            pillarLeft.position.set(-5, 5, -30 * i);
+            pillarRight.position.set(5, 5, -30 * i);
+
+            pillarLeft.castShadow = true;
+            pillarRight.castShadow = true;
+
+            scene.add(pillarLeft);
+            scene.add(pillarRight);
+
+            pillars.push(pillarLeft, pillarRight);
+        }
+    }
+
+    // Create obstacles
+    function createObstacles() {
+        const obstacleGeometry = new THREE.SphereGeometry(0.5, 32, 32);
+        const obstacleMaterial = new THREE.MeshPhongMaterial({color: 0xff0000});  // Red color
+
+        for (let i = 0; i < 20; i++) {
+            const obstacle = new THREE.Mesh(obstacleGeometry, obstacleMaterial);
+            obstacle.position.set(
+                Math.random() * 8 - 4,  // Random x position between -4 and 4
+                1,  // Y position
+                -30 * (i + 1)  // Z position, spaced out
+            );
+            obstacle.castShadow = true;
+            scene.add(obstacle);
+            obstacles.push(obstacle);
+        }
+    }
+
+    // Handle window resizing
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // Handle key press
+    function onKeyDown(event) {
+        switch (event.code) {
+            case 'KeyW':
+                moveForward = true;
+                break;
+            case 'KeyS':
+                moveBackward = true;
+                break;
+            case 'KeyA':
+                moveLeft = true;
+                break;
+            case 'KeyD':
+                moveRight = true;
+                break;
+            case 'KeyR':
+                reload();
+                break;
+        }
+    }
+
+    // Handle key release
+    function onKeyUp(event) {
+        switch (event.code) {
+            case 'KeyW':
+                moveForward = false;
+                break;
+            case 'KeyS':
+                moveBackward = false;
+                break;
+            case 'KeyA':
+                moveLeft = false;
+                break;
+            case 'KeyD':
+                moveRight = false;
+                break;
+        }
+    }
+
+    // Handle mouse movement
+    function onMouseMove(event) {
+        if (document.pointerLockElement === document.body) {
+            camera.rotation.y -= event.movementX * 0.002;
+            camera.rotation.x -= event.movementY * 0.002;
+            camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+        }
+    }
+
+    // Handle mouse down
+    function onMouseDown(event) {
+        if (event.button === 0) {  // Left mouse button
+            shoot();
+        }
+    }
+
+    // Handle mouse up
+    function onMouseUp(event) {
+        if (event.button === 0) {  // Left mouse button
+            // Stop shooting
+        }
+    }
+
+    // Shoot function
+    function shoot() {
+        if (canShoot && ammo > 0) {
+            canShoot = false;
+            ammo--;
+            updateAmmoDisplay();
+
+            // Show muzzle flash
+            muzzleFlash.material.opacity = 1;
+            setTimeout(() => {
+                muzzleFlash.material.opacity = 0;
+            }, 50);
+
+            // Create bullet
+            const bulletGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+            const bulletMaterial = new THREE.MeshBasicMaterial({color: 0xffff00});
+            const bullet = new THREE.Mesh(bulletGeometry, bulletMaterial);
+            bullet.position.set(player.position.x, player.position.y + 1.6, player.position.z);
+            scene.add(bullet);
+
+            // Set bullet velocity
+            const bulletSpeed = 50;
+            const bulletVelocity = new THREE.Vector3(0, 0, -1);
+            bulletVelocity.applyQuaternion(camera.quaternion);
+            bulletVelocity.multiplyScalar(bulletSpeed);
+
+            // Move bullet
+            const bulletInterval = setInterval(() => {
+                bullet.position.add(bulletVelocity.clone().multiplyScalar(deltaTime));
+
+                // Check for collision with obstacles
+                obstacles.forEach((obstacle, index) => {
+                    if (bullet.position.distanceTo(obstacle.position) < 0.5) {
+                        clearInterval(bulletInterval);
+                        scene.remove(bullet);
+                        scene.remove(obstacle);
+                        obstacles.splice(index, 1);
+                        createExplosion(obstacle.position);
+                        score += 10;
+                        updateScoreDisplay();
+                    }
+                });
+
+                // Remove bullet if it goes too far
+                if (bullet.position.distanceTo(player.position) > 1000) {
+                    clearInterval(bulletInterval);
+                    scene.remove(bullet);
+                }
+            }, 16);
+
+            // Reset shoot cooldown
+            setTimeout(() => {
+                canShoot = true;
+            }, shootCooldown * 1000);
+        }
+    }
+
+    // Reload function
+    function reload() {
+        if (ammo < maxAmmo) {
+            ammo = maxAmmo;
+            updateAmmoDisplay();
+        }
+    }
+
+    // Update ammo display
+    function updateAmmoDisplay() {
+        document.getElementById('ammo').textContent = `Ammo: ${ammo} / ${maxAmmo}`;
+    }
+
+    // Update score display
+    function updateScoreDisplay() {
+        document.getElementById('score').textContent = `Score: ${score}`;
+    }
+
+    // Create explosion
+    function createExplosion(position) {
+        const particleCount = 100;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount; i++) {
+            positions[i * 3] = position.x;
+            positions[i * 3 + 1] = position.y;
+            positions[i * 3 + 2] = position.z;
+
+            colors[i * 3] = 1;
+            colors[i * 3 + 1] = 0.5;
+            colors[i * 3 + 2] = 0;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 0.1,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            transparent: true,
+            depthWrite: false
+        });
+
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        const velocities = [];
+        for (let i = 0; i < particleCount; i++) {
+            const velocity = new THREE.Vector3(
+                Math.random() * 2 - 1,
+                Math.random() * 2 - 1,
+                Math.random() * 2 - 1
+            );
+            velocity.normalize().multiplyScalar(Math.random() * 2);
+            velocities.push(velocity);
+        }
+
+        const particleSystem = { particles, velocities, lifespan: 1 };
+        particleSystems.push(particleSystem);
+    }
+
+    // Update particle systems
+    function updateParticleSystems(deltaTime) {
+        for (let i = particleSystems.length - 1; i >= 0; i--) {
+            const system = particleSystems[i];
+            const positions = system.particles.geometry.attributes.position.array;
+            const colors = system.particles.geometry.attributes.color.array;
+
+            for (let j = 0; j < positions.length; j += 3) {
+                positions[j] += system.velocities[j / 3].x * deltaTime;
+                positions[j + 1] += system.velocities[j / 3].y * deltaTime;
+                positions[j + 2] += system.velocities[j / 3].z * deltaTime;
+
+                colors[j + 1] -= deltaTime;  // Fade to red
+                colors[j + 2] -= deltaTime;  // Fade out blue
+            }
+
+            system.particles.geometry.attributes.position.needsUpdate = true;
+            system.particles.geometry.attributes.color.needsUpdate = true;
+
+            system.lifespan -= deltaTime;
+            if (system.lifespan <= 0) {
+                scene.remove(system.particles);
+                particleSystems.splice(i, 1);
+            }
+        }
+    }
+
+    // Start animating with a target FPS
+    function startAnimating(fps) {
+        fpsInterval = 1000 / fps;
+        then = Date.now();
+        startTime = then;
+        animate();
+    }
+
+    // Update game state
+    function update() {
+        deltaTime = clock.getDelta();
+
+        // Update particle systems
+        updateParticleSystems(deltaTime);
+
+        // Player movement
+        velocity.x -= velocity.x * 10.0 * deltaTime;
+        velocity.z -= velocity.z * 10.0 * deltaTime;
+
+        direction.z = Number(moveForward) - Number(moveBackward);
+        direction.x = Number(moveRight) - Number(moveLeft);
+        direction.normalize();
+
+        if (moveForward || moveBackward) velocity.z -= direction.z * moveSpeed * deltaTime;
+        if (moveLeft || moveRight) velocity.x -= direction.x * moveSpeed * deltaTime;
+
+        player.translateX(-velocity.x * deltaTime);
+        player.translateZ(-velocity.z * deltaTime);
+
+        // Move pillars and obstacles
+        const moveSpeed = 10 * deltaTime;
+        pillars.forEach(pillar => {
+            pillar.position.z += moveSpeed;
+            if (pillar.position.z > 10) {
+                pillar.position.z -= 1200;
+                score++;
+                updateScoreDisplay();
+            }
+        });
+
+        obstacles.forEach(obstacle => {
+            obstacle.position.z += moveSpeed;
+            if (obstacle.position.z > 10) {
+                obstacle.position.z -= 600;
+                obstacle.position.x = Math.random() * 8 - 4;
+            }
+        });
+
+        // Collision detection
+        raycaster.ray.origin.copy(player.position);
+        const intersections = raycaster.intersectObjects(obstacles);
+        if (intersections.length > 0 && intersections[0].distance < 1) {
+            health -= 10;
+            updateHealthBar();
+            if (health <= 0) {
+                gameOver();
+            }
+        }
+
+        // Weapon sway
+        const swayAmount = 0.03;
+        const swaySpeed = 2;
+        weapon.position.y = -0.3 + Math.sin(Date.now() * 0.01) * swayAmount;
+        weapon.position.x = 0.3 + Math.cos(Date.now() * 0.01) * swayAmount;
+        weapon.rotation.z = Math.sin(Date.now() * 0.005) * (swayAmount * swaySpeed);
+    }
+
+    // Update health bar
+    function updateHealthBar() {
+        const healthBarFill = document.getElementById('healthBarFill');
+        healthBarFill.style.width = `${health}%`;
+        healthBarFill.style.backgroundColor = `rgb(${255 - health * 2.55}, ${health * 2.55}, 0)`;
+    }
+
+    // Game over function
+    function gameOver() {
+        // Implement game over logic here
+        console.log("Game Over!");
+        // You might want to stop the game loop, show a game over screen, etc.
+    }
+
+    // Animation loop
+    function animate() {
+        requestAnimationFrame(animate);
+
+        now = Date.now();
+        elapsed = now - then;
+
+        if (elapsed > fpsInterval) {
+            then = now - (elapsed % fpsInterval);
+
+            update();
+            renderer.render(scene, camera);
+
+            frameCount++;
+            if (now > startTime + 1000) {
+                const fps = Math.round((frameCount * 1000) / (now - startTime));
+                document.getElementById('fps').textContent = `FPS: ${fps}`;
+                frameCount = 0;
+                startTime = now;
+            }
+        }
+    }
+
+    // Start the game
+    init();
+    </script>
+</body>
+</html>
